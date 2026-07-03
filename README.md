@@ -128,9 +128,14 @@ loki run /path/to/spring-repo --config loki.yaml --resume
 
 | Flag | Effect |
 |---|---|
-| `--dry-run` | Generate + gate, write candidates, **no PRs**. |
+| `--dry-run` | Generate + gate, write candidates, **no build, no PRs**. |
 | `--resume` | Continue from the durable work queue. |
+| `--no-pr` | Full run + write the report, but do not open PRs. |
 | `--max-turns <n>` | Override LLM turns per class (config: `verification.max_llm_turns_per_class`). |
+
+A full `loki run` (without `--dry-run`) performs Phase 0 bootstrap (inject test
+deps into `build.gradle`, baseline coverage) and Phase 5 delivery (write
+`.loki/report.md`, open chunked PRs) automatically. `--dry-run` does neither.
 
 Other tuning lives in `loki.yaml` (see `config/loki.example.yaml`):
 `quality.chase_mutants`, `quality.pit_enabled`, `quality.target_branch_coverage`,

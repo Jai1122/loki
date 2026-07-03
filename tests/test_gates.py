@@ -132,6 +132,44 @@ def test_nested_class_test_methods_are_analyzed() -> None:
     assert any(v.rule == gates.TAUTOLOGY for v in gates.analyze(src))
 
 
+def test_constant_expression_assert_is_tautology() -> None:
+    assert any(v.rule == gates.TAUTOLOGY for v in gates.analyze(wrap("@Test void t() { assertTrue(1 == 1); }")))
+    assert any(v.rule == gates.TAUTOLOGY for v in gates.analyze(wrap("@Test void t() { assertFalse(2 > 1); }")))
+
+
+def test_assert_true_on_variable_is_meaningful() -> None:
+    assert gates.passes(wrap("@Test void t() { assertTrue(service.isReady()); }"))
+
+
+def test_delegated_assertion_helper_is_not_rejected() -> None:
+    # A test that delegates checks to a custom assert*/verify* helper must pass.
+    assert gates.passes(wrap("@Test void t() { verifyResult(service.run()); }"))
+    assert gates.passes(wrap("@Test void t() { assertValidOrder(service.create()); }"))
+
+
+def test_non_deterministic_constructs_are_rejected() -> None:
+    bad = [
+        "@Test void t() { Thread.sleep(10); assertThat(x).isEqualTo(1); }",
+        "@Test void t() { assertThat(svc.at(java.time.Instant.now())).isEqualTo(1); }",
+        "@Test void t() { int r = new java.util.Random().nextInt(); assertThat(f(r)).isEqualTo(1); }",
+        "@Test void t() { assertThat(java.util.UUID.randomUUID()).isNotNull(); }",
+    ]
+    for method in bad:
+        rules = [v.rule for v in gates.analyze(wrap(method))]
+        assert gates.NON_DETERMINISTIC in rules, f"missed non-determinism in: {method}"
+
+
+def test_injected_clock_now_is_allowed() -> None:
+    # LocalDate.now(clock) has an argument -> deterministic -> not flagged.
+    src = wrap("@Test void t() { assertThat(svc.today(java.time.LocalDate.now(clock))).isEqualTo(d); }")
+    assert not any(v.rule == gates.NON_DETERMINISTIC for v in gates.analyze(src))
+
+
+def test_seeded_random_is_allowed() -> None:
+    src = wrap("@Test void t() { var r = new java.util.Random(42L); assertThat(svc.pick(r)).isEqualTo(3); }")
+    assert not any(v.rule == gates.NON_DETERMINISTIC for v in gates.analyze(src))
+
+
 def test_parameterized_test_with_value_source_braces() -> None:
     # Annotation-array braces must not confuse method-body detection.
     src = (

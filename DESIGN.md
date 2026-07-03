@@ -518,4 +518,60 @@ delivery:
 3. **Phase 0 bootstrap** (module detection, dependency injection into `build.gradle`, JaCoCo baseline, exemplar harvest).
 4. **§9 quality gates + gate self-tests** (so "no meaningless test" is guaranteed from day one).
 
-(Implementation has not started; this document is the agreed specification.)
+---
+
+## 20. Implementation Status
+
+Honest mapping of documented features to their state in the code. "Tested"
+means covered by the automated suite (`python -m pytest`); "live-verified" means
+exercised end-to-end against a real HTTP endpoint (stub) as well.
+
+| Feature | Module(s) | Status |
+|---|---|---|
+| Config: endpoint / model / token env | `config.py` | Implemented, tested |
+| OpenAI-compatible vLLM client | `llm/client.py` | Implemented, tested + live-verified |
+| Throughput benchmark (`loki benchmark`) | `benchmark.py`, `cli.py` | Implemented, tested + live-verified |
+| Phase 0 bootstrap: inject `build.gradle` deps | `bootstrap/gradle_deps.py`, `pipeline.ensure_dependencies` | Implemented, tested (Groovy `build.gradle` only; `.kts` skipped) |
+| Phase 0 bootstrap: baseline coverage | `bootstrap/baseline.py`, `pipeline.make_baseline_provider` | Implemented; needs real Gradle to produce numbers |
+| Phase 0: exemplar harvest | `bootstrap/exemplars.py` | Implemented, tested |
+| Phase 1 scan & prioritized work queue | `scan/*`, `planner.py` | Implemented, tested |
+| Phase 2 parallel generation swarm | `generate/*`, `llm/*` | Implemented, tested + live-verified (dry run) |
+| §9 meaningful-assertion gates | `verify/gates.py` | Implemented, tested (28 self-tests) |
+| §5 deterministic auto-fixers | `verify/autofix.py` | Implemented, tested |
+| Phase 3 verify (compile/test/JaCoCo) | `verify/coordinator.py`, `pipeline._verify_module` | Implemented, tested with fake-Gradle emitting real XML; not run against a live Gradle build here |
+| Phase 4 feedback / repair loop | `pipeline`, `generate/generator.py` | Implemented, tested |
+| PIT mutation (soft signal) | `verify/pit.py`, `pipeline._run_mutation` | Implemented, tested |
+| `quality.chase_mutants` pass | `pipeline._chase_mutants` | Implemented (off by default), path tested via fake Gradle |
+| Existing tests never overwritten | `pipeline._is_preexisting_hand_written` | Implemented, tested |
+| Phase 5 delivery: report + chunked PRs | `deliver/*`, `pipeline.deliver` | Implemented, tested (git/gh via injectable runner) |
+| Resumable work queue | `state/store.py` | Implemented, tested |
+| CLI: `scan` / `run` / `report` / `benchmark` | `cli.py` | Implemented, tested |
+
+**Known simplifications (documented, not silent):**
+- **Verification cadence.** DESIGN §4.4 describes verifying "as soon as K
+  candidates are ready." The implementation generates the full swarm, then
+  verifies **once per module in a single batch**. This is correct (every
+  candidate is verified) but does not stream by `K`; `candidates_per_batch_k`
+  is reserved for a future streaming optimization.
+- **Not run against a live Gradle build or a live vLLM model** from the dev
+  machine — those require the secured environment. Coordinator/PIT/JaCoCo logic
+  is proven with fixture XML and fake runners.
+
+**Known limitations (surfaced by an adversarial self-review):**
+- **Determinism gate is heuristic.** It rejects `Thread.sleep`, `Math.random`,
+  `System.currentTimeMillis/nanoTime`, `UUID.randomUUID`, unseeded
+  `new Random()`/`new Date()`, and real-clock `X.now()`. It does not catch every
+  non-deterministic construct (e.g. real sockets/file I/O); those are rarer and
+  caught at compile/review.
+- **Assertion helpers are trusted.** A call to a custom `assert*/verify*/check*/
+  expect*/ensure*/should*` method counts as a delegated assertion (so
+  helper-based tests are not falsely rejected). A helper with that naming that
+  does not actually assert would pass — an accepted trade-off to avoid false
+  rejections. A helper with a non-standard name that *does* assert would be
+  falsely rejected.
+- **Class-name/file-name mismatch** is not pre-validated: if the model names the
+  class differently from `<Class>Test`, the file fails to compile and the
+  compile→repair loop fixes it (costs one turn).
+- **Regex fallback** (only used when javalang cannot parse Java-21 syntax) may
+  list method-local variables as "fields," but this is benign: only
+  `@Autowired`/`@Inject` fields become mock collaborators, so locals never do.

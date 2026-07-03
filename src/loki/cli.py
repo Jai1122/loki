@@ -18,7 +18,14 @@ from loki.config import load_config
 from loki.deliver.report import build_report
 from loki.errors import LokiError
 from loki.llm.client import LLMClient
-from loki.pipeline import Pipeline, run_dry, run_full
+from loki.pipeline import (
+    Pipeline,
+    deliver,
+    ensure_dependencies,
+    make_baseline_provider,
+    run_dry,
+    run_full,
+)
 from loki.planner import build_plan
 from loki.state.model import TaskState
 from loki.state.store import StateStore
@@ -52,8 +59,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
         store = StateStore.load(state_path)
         requeued = store.requeue_stale_in_progress()
         print(f"Resuming; re-queued {requeued} interrupted task(s).")
+    elif args.dry_run:
+        store = build_plan(args.repo, config, state_path)  # no build in dry-run
+        print(f"Planned {len(store.all_tasks())} target class(es).")
     else:
-        store = build_plan(args.repo, config, state_path)
+        # Phase 0 bootstrap: inject build deps (single owner) and baseline coverage.
+        changed = ensure_dependencies(args.repo)
+        if changed:
+            print(f"Bootstrapped build.gradle in module(s): {', '.join(changed)}")
+        store = build_plan(args.repo, config, state_path, baseline_provider=make_baseline_provider())
         print(f"Planned {len(store.all_tasks())} target class(es).")
 
     client = LLMClient(config.llm)
@@ -64,7 +78,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print("Dry run complete (candidates written, gates applied; no build, no PRs).")
     else:
         run_full(pipeline)
-        print("Run complete.")
+        report_path = deliver(pipeline, open_prs=not args.no_pr)
+        print(f"Run complete. Report: {report_path}")
+        if args.no_pr:
+            print("(--no-pr: report written, PRs not opened)")
 
     counts = store.counts()
     print(f"Results: {counts[TaskState.PASSED.value]} passed, "
@@ -119,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--config", required=True)
     p_run.add_argument("--dry-run", action="store_true", help="Generate + gate; no build, no PRs")
     p_run.add_argument("--resume", action="store_true", help="Resume from saved state")
+    p_run.add_argument("--no-pr", action="store_true", help="Write the report but do not open PRs")
     p_run.add_argument("--max-turns", type=int, default=None,
                        help="Override LLM turns per class (config: verification.max_llm_turns_per_class)")
     p_run.set_defaults(func=_cmd_run)

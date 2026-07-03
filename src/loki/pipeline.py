@@ -19,12 +19,16 @@ from pathlib import Path
 from loki.config import LokiConfig
 from loki.errors import LLMError, ParseError
 from loki.generate.contextpack import build_context_pack
-from loki.generate.generator import generate, generate_repair
+from loki.generate.generator import generate, generate_coverage_extension, generate_repair
 from loki.generate.worker_pool import run_swarm
+from loki.bootstrap.baseline import compute_baseline
 from loki.bootstrap.exemplars import harvest_exemplars
+from loki.bootstrap.gradle_deps import ensure_test_dependencies
+from loki.deliver.pr import create_prs
+from loki.deliver.report import build_report
 from loki.llm.client import LLMClient
 from loki.proc import Runner, run_command
-from loki.scan.ast import discover_modules
+from loki.scan.ast import Module, discover_modules
 from loki.state.model import FailedTest, Task, TaskState, VerificationResult
 from loki.state.store import StateStore
 from loki.verify import gates
@@ -68,6 +72,23 @@ class Pipeline:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(source, encoding="utf-8")
 
+    def _is_preexisting_hand_written(self, task: Task) -> bool:
+        """True if a hand-written test already occupies the target path.
+
+        Guarantee (DESIGN.md §15): never overwrite an existing test. A fresh task
+        (no prior LOKI output) whose target file already exists is treated as
+        hand-written and skipped. Tasks LOKI has already touched (``test_source``
+        set or ``llm_turns > 0``, e.g. on --resume) may rewrite their own file.
+        """
+        if task.test_source is not None or task.llm_turns > 0:
+            return False
+        return (self.root / task.test_path).exists()
+
+    def _park_preexisting(self, task: Task) -> None:
+        task.state = TaskState.PARKED
+        task.last_error = "existing hand-written test present; not overwritten"
+        self.store.update(task)
+
     def _generate(self, task: Task) -> str:
         """Generate + auto-fix a candidate. Raises ParseError/LLMError on failure."""
         source_text = self._read_source(task)
@@ -86,6 +107,9 @@ class Pipeline:
     # -- dry-run handler --------------------------------------------------
 
     def dry_handler(self, task: Task) -> None:
+        if self._is_preexisting_hand_written(task):
+            self._park_preexisting(task)
+            return
         task.llm_turns += 1
         try:
             source = self._generate(task)
@@ -108,6 +132,9 @@ class Pipeline:
 
     def generate_handler(self, task: Task) -> None:
         """Generate, auto-fix, gate-repair, write, and mark VERIFYING or PARKED."""
+        if self._is_preexisting_hand_written(task):
+            self._park_preexisting(task)
+            return
         try:
             source = self._generate(task)
             task.llm_turns += 1
@@ -224,3 +251,94 @@ def _run_mutation(pipeline: Pipeline, coordinator) -> None:
             task.mutation_score = round(report.score, 4)
             task.surviving_mutants = report.surviving_details
             pipeline.store.update(task)
+
+    if pipeline.config.quality.chase_mutants:
+        _chase_mutants(pipeline, coordinator)
+
+
+def _chase_mutants(pipeline: "Pipeline", coordinator) -> None:
+    """Optional pass: spend remaining turns extending tests to kill survivors.
+
+    Off by default (DESIGN.md §7). Each extension is verified; if it breaks the
+    build or tests, the prior green test is restored so quality never regresses.
+    """
+    budget = pipeline.config.verification.max_llm_turns_per_class
+    targets = [
+        t
+        for t in pipeline.store.tasks_by_state(TaskState.PASSED)
+        if t.surviving_mutants and t.test_source and t.llm_turns < budget
+    ]
+    for task in targets:
+        prior = task.test_source
+        try:
+            extended = generate_coverage_extension(
+                pipeline.client, task, prior, uncovered_hints=[], missing_categories=task.surviving_mutants
+            )
+            fixed, _ = autofix(extended.test_source, task.package)
+        except (ParseError, LLMError):
+            continue
+        pipeline._write_test(task, fixed)
+        task.llm_turns += 1
+        compiled, _ = coordinator.compile_tests()
+        _, failures = (coordinator.run_tests() if compiled else (0, [FailedTest("_", "compile")]))
+        if compiled and not _has_failure(task, failures):
+            report = coordinator.mutation([task.fqcn]).get(task.fqcn)
+            if report is not None:
+                task.mutation_score = round(report.score, 4)
+                task.surviving_mutants = report.surviving_details
+            task.test_source = fixed
+        else:
+            pipeline._write_test(task, prior)  # restore the last green version
+        pipeline.store.update(task)
+
+
+# --- Phase 0 bootstrap orchestration (DESIGN.md §4.1) --------------------
+
+def ensure_dependencies(repo_root: str | Path, runner: Runner = run_command) -> list[str]:
+    """Inject test + measurement deps into each module's ``build.gradle`` (once).
+
+    The sole owner of build-file edits (DESIGN.md §3). Only Groovy ``build.gradle``
+    is modified; a Kotlin ``build.gradle.kts`` is left untouched to avoid emitting
+    invalid syntax. Returns the names of modules whose build file changed.
+    """
+    changed: list[str] = []
+    for module in discover_modules(repo_root):
+        build_file = module.root / "build.gradle"
+        if not build_file.exists():
+            continue
+        text = build_file.read_text(encoding="utf-8")
+        updated, was_changed = ensure_test_dependencies(text)
+        if was_changed:
+            build_file.write_text(updated, encoding="utf-8")
+            changed.append(module.name)
+    return changed
+
+
+def make_baseline_provider(runner: Runner = run_command):
+    """A baseline provider that runs each module's tests + JaCoCo (DESIGN.md §4.1)."""
+
+    def provider(module: Module) -> dict[str, float]:
+        return compute_baseline(module.root, runner=runner)
+
+    return provider
+
+
+# --- Phase 5 delivery orchestration (DESIGN.md §4.6) ---------------------
+
+def deliver(pipeline: "Pipeline", open_prs: bool) -> Path:
+    """Write the run report and (optionally) open chunked PRs. Returns report path."""
+    report = build_report(pipeline.store)
+    report_path = pipeline.root / ".loki" / "report.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report, encoding="utf-8")
+    if open_prs:
+        intro = f"Characterization tests generated by LOKI ({pipeline.config.delivery.label})."
+        create_prs(
+            pipeline.root,
+            pipeline.store,
+            pipeline.config.delivery.pr_chunking,
+            pipeline.config.delivery.label,
+            intro,
+            pipeline.runner,
+        )
+    return report_path

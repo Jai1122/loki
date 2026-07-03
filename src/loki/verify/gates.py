@@ -40,6 +40,30 @@ DOES_NOT_THROW_ONLY = "does_not_throw_only"
 INTERACTION_ONLY = "interaction_only"
 STUB_FAIL_ONLY = "stub_fail_only"
 DISABLED_WITHOUT_REASON = "disabled_without_reason"
+NON_DETERMINISTIC = "non_deterministic"
+
+# A boolean argument built only from literals/operators (no variables) is a
+# constant — e.g. assertTrue(1 == 1) — which tests nothing.
+_CONSTANT_EXPR = re.compile(r"^[\d.\s()+\-*/%<>=!&|^~]+$")
+# Custom assertion helpers (assertX/verifyX/checkX/expectX/...) count as a
+# delegated assertion, so helper-based tests are not falsely rejected.
+_DELEGATE_ASSERTION = re.compile(r"^(assert|verify|check|expect|ensure|should)[A-Za-z0-9_$]")
+# Non-deterministic constructs forbidden in generated tests (DESIGN.md §8).
+_NON_DETERMINISM = [
+    (re.compile(r"\bThread\s*\.\s*sleep\s*\("), "Thread.sleep"),
+    (re.compile(r"\bMath\s*\.\s*random\s*\("), "Math.random"),
+    (re.compile(r"\bSystem\s*\.\s*(?:currentTimeMillis|nanoTime)\s*\("), "System time"),
+    (re.compile(r"\bUUID\s*\.\s*randomUUID\s*\("), "UUID.randomUUID"),
+    (re.compile(r"\bnew\s+(?:[\w.]*\.)?Random\s*\(\s*\)"), "new Random()"),
+    (re.compile(r"\bnew\s+(?:[\w.]*\.)?Date\s*\(\s*\)"), "new Date()"),
+    (
+        re.compile(
+            r"\b(?:Instant|LocalDate|LocalDateTime|LocalTime|ZonedDateTime|OffsetDateTime"
+            r"|Clock|Year|YearMonth|MonthDay)\s*\.\s*now\s*\(\s*\)"
+        ),
+        "real clock .now()",
+    ),
+]
 
 # Internal per-assertion signals.
 _MEANINGFUL = "meaningful"
@@ -139,9 +163,13 @@ def _classify_call(name: str, masked_body: str, paren_idx: int) -> str:
     if name in ("verifyNoInteractions", "verifyNoMoreInteractions", "verifyZeroInteractions"):
         return _MEANINGFUL
     if name == "assertTrue":
-        return _TAUTOLOGY if arg0 in ("true", "boolean.true") else _MEANINGFUL
+        if arg0 in ("true", "boolean.true", "!false") or _CONSTANT_EXPR.match(arg0):
+            return _TAUTOLOGY
+        return _MEANINGFUL
     if name == "assertFalse":
-        return _TAUTOLOGY if arg0 in ("false", "boolean.false") else _MEANINGFUL
+        if arg0 in ("false", "boolean.false", "!true") or _CONSTANT_EXPR.match(arg0):
+            return _TAUTOLOGY
+        return _MEANINGFUL
     if name == "assertNull":
         return _TAUTOLOGY if arg0 == "null" else _MEANINGFUL
     if name == "assertNotNull":
@@ -172,10 +200,14 @@ def _method_violation(name: str, body: str) -> str | None:
     has_any = False
     for match in _CALL.finditer(masked_body):
         token = match.group(1)
-        if token not in _KNOWN_ASSERTIONS:
-            continue
-        has_any = True
-        signals.add(_classify_call(token, masked_body, match.end() - 1))
+        if token in _KNOWN_ASSERTIONS:
+            has_any = True
+            signals.add(_classify_call(token, masked_body, match.end() - 1))
+        elif _DELEGATE_ASSERTION.match(token):
+            # A custom assertion helper (assertX/verifyX/...) is assumed to assert;
+            # this avoids falsely rejecting tests that delegate their checks.
+            has_any = True
+            signals.add(_MEANINGFUL)
 
     if _MEANINGFUL in signals:
         return None
@@ -194,6 +226,14 @@ def _method_violation(name: str, body: str) -> str | None:
     return ZERO_ASSERTION
 
 
+def _determinism_violations(test_source: str) -> list[GateViolation]:
+    masked = mask(test_source)
+    hits = [label for pattern, label in _NON_DETERMINISM if pattern.search(masked)]
+    if not hits:
+        return []
+    return [GateViolation(NON_DETERMINISTIC, "non-deterministic construct(s): " + ", ".join(hits))]
+
+
 def analyze(test_source: str) -> list[GateViolation]:
     """Return every meaningful-assertion violation in a generated test class."""
     methods = find_test_methods(test_source)
@@ -210,6 +250,8 @@ def analyze(test_source: str) -> list[GateViolation]:
         rule = _method_violation(method.name, method.body)
         if rule is not None:
             violations.append(GateViolation(rule, f"{method.name}: {rule.replace('_', ' ')}"))
+    # Determinism guardrails apply to the whole class (DESIGN.md §8).
+    violations.extend(_determinism_violations(test_source))
     return violations
 
 
