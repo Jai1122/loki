@@ -1,0 +1,33 @@
+# LOKI configuration (see DESIGN.md §16). Copy to loki.yaml and edit.
+# The bearer token is NOT stored here — it is read from the env var named below.
+
+llm:
+  base_url: https://myvllm.com/v1     # OpenAI-compatible vLLM endpoint
+  api_key_env: LOKI_LLM_TOKEN         # export LOKI_LLM_TOKEN=... before running
+  model: minimax                      # or a qwen-* model served by your vLLM
+  max_context_tokens: 90000
+  temperature: 0.2
+  request_timeout_s: 120
+
+concurrency:
+  worker_pool_size: 0                 # 0 = auto (size to your vLLM ceiling)
+  requests_per_second: 0              # 0 = unthrottled beyond the pool size
+
+verification:
+  candidates_per_batch_k: 8           # verify when K candidates are ready
+  max_llm_turns_per_class: 5          # auto-fixes are free and do not count
+
+quality:
+  pit_enabled: true                   # mutation testing as a SOFT signal
+  chase_mutants: false                # off by default (protects throughput)
+  target_branch_coverage: 0.90
+
+delivery:
+  pr_chunking: per-module             # or per-package
+  label: characterization-tests
+
+exclusions:
+  - "**/config/**"
+  - "**/dto/**"
+  - "**/*MapperImpl.java"
+  - "**/generated/**"

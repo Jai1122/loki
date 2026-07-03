@@ -1,0 +1,41 @@
+# --- Python ---
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- LOKI runtime state & local config (NEVER commit) ---
+.loki/                 # durable run state (may contain repo paths / code excerpts)
+loki.yaml              # real config (points at your endpoint)
+loki.local.yaml
+*.local.yaml
+
+# --- Secrets / credentials (NEVER commit) ---
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+*.token
+secrets/
+**/secrets.*
+
+# --- Local tooling / harness settings ---
+.agent/
+.tooling/
+
+# --- Editor / OS ---
+.idea/
+.vscode/
+.DS_Store
+*.log
