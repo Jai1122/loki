@@ -54,9 +54,15 @@ class LLMClient:
         self._config = config
         self._transport = transport or _default_transport()
 
-    def complete(self, system: str, user: str, temperature: float | None = None) -> str:
+    def complete(
+        self,
+        system: str,
+        user: str,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
         """Return the assistant message content for a system+user turn."""
-        body = {
+        body: dict = {
             "model": self._config.model,
             "messages": [
                 {"role": "system", "content": system},
@@ -64,6 +70,8 @@ class LLMClient:
             ],
             "temperature": self._config.temperature if temperature is None else temperature,
         }
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
         headers = {
             "Authorization": f"Bearer {self._config.api_key}",
             "Content-Type": "application/json",

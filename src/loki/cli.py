@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from loki import __version__
+from loki.benchmark import recommend_pool_size, run_benchmark
 from loki.config import load_config
 from loki.deliver.report import build_report
 from loki.errors import LokiError
@@ -43,6 +44,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     config = load_config(args.config)
+    if args.max_turns is not None:
+        config.verification.max_llm_turns_per_class = args.max_turns
     state_path = _state_path(args.repo)
 
     if args.resume:
@@ -76,6 +79,30 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_benchmark(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    client = LLMClient(config.llm)
+    print(f"Benchmarking {config.llm.base_url} (model={config.llm.model})")
+    print(f"{args.requests} request(s) per level, up to concurrency {args.max_concurrency}\n")
+    results = run_benchmark(client, args.max_concurrency, args.requests)
+
+    print(f"{'concurrency':>11} | {'ok/total':>9} | {'throughput':>12} | {'mean latency':>12}")
+    print("-" * 54)
+    for r in results:
+        print(
+            f"{r.concurrency:>11} | {r.successes:>3}/{r.requests:<5} | "
+            f"{r.throughput_rps:>8.2f} rps | {r.mean_latency_s:>9.2f} s"
+        )
+
+    recommended = recommend_pool_size(results)
+    print()
+    if recommended == 0:
+        print("All requests failed — check llm.base_url, the token env var, and llm.model.")
+        return 1
+    print(f"Recommended concurrency.worker_pool_size: {recommended}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="loki", description="LOKI test-generation swarm")
     parser.add_argument("--version", action="version", version=f"loki {__version__}")
@@ -92,11 +119,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--config", required=True)
     p_run.add_argument("--dry-run", action="store_true", help="Generate + gate; no build, no PRs")
     p_run.add_argument("--resume", action="store_true", help="Resume from saved state")
+    p_run.add_argument("--max-turns", type=int, default=None,
+                       help="Override LLM turns per class (config: verification.max_llm_turns_per_class)")
     p_run.set_defaults(func=_cmd_run)
 
     p_report = sub.add_parser("report", help="Print the report for an existing run")
     p_report.add_argument("repo")
     p_report.set_defaults(func=_cmd_report)
+
+    p_bench = sub.add_parser("benchmark", help="Measure vLLM throughput to size the swarm")
+    p_bench.add_argument("--config", required=True)
+    p_bench.add_argument("--requests", type=int, default=6, help="Requests per concurrency level")
+    p_bench.add_argument("--max-concurrency", type=int, default=8)
+    p_bench.set_defaults(func=_cmd_benchmark)
 
     return parser
 

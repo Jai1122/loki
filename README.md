@@ -122,21 +122,20 @@ loki run /path/to/spring-repo --config loki.yaml
 
 # Resume an interrupted run (durable work queue picks up where it stopped)
 loki run /path/to/spring-repo --config loki.yaml --resume
-
-# Push assertion quality on high-risk packages (spend LLM turns killing mutants)
-loki run /path/to/spring-repo --config loki.yaml --chase-mutants "com.acme.billing.*"
 ```
 
-### Useful flags
+### `run` flags
 
 | Flag | Effect |
 |---|---|
 | `--dry-run` | Generate + gate, write candidates, **no PRs**. |
 | `--resume` | Continue from the durable work queue. |
-| `--chase-mutants <glob>` | Spend LLM turns killing surviving mutants for matching packages (off by default). |
-| `--only <glob>` | Restrict targets to matching classes/packages. |
-| `--max-turns <n>` | Override LLM turns per class (default 5). |
-| `--k <n>` | Candidates per verification batch. |
+| `--max-turns <n>` | Override LLM turns per class (config: `verification.max_llm_turns_per_class`). |
+
+Other tuning lives in `loki.yaml` (see `config/loki.example.yaml`):
+`quality.chase_mutants`, `quality.pit_enabled`, `quality.target_branch_coverage`,
+`verification.candidates_per_batch_k`, `concurrency.worker_pool_size`, and
+`exclusions`.
 
 ---
 
@@ -182,7 +181,7 @@ Full detail: `DESIGN.md` §4.
 | Throughput collapses / timeouts | Worker pool exceeds vLLM `max_num_seqs`. Re-run `loki benchmark`; set `worker_pool_size` accordingly. |
 | Many classes `parked` at "won't compile" | Model struggling; check exemplar quality and collaborator signatures in the context pack. Consider raising `max_llm_turns`. |
 | PIT is very slow | It's scoped per touched class and run once; if still slow, set `pit_enabled: false` (TVA static gates still enforce meaningfulness). |
-| Coverage rises but PRs look weak | Low mutation scores in the report → triage those classes; consider `--chase-mutants` on the hot packages. |
+| Coverage rises but PRs look weak | Low mutation scores in the report → triage those classes; enable `quality.chase_mutants` in `loki.yaml` for the hot packages. |
 | Gradle daemon lock errors | Don't run multiple LOKI processes on one repo; verification is intentionally serialized per module. |
 
 ---
